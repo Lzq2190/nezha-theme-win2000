@@ -225,6 +225,7 @@
       cycleTraffic: "本周期流量",
       totalTraffic: "累计流量",
       bucketRtt: "最近 1 天每个采样桶的往返时延",
+      thisServer: "本服务器当日丢包",
       bucketLoss: "30 天内每天的丢包比例",
       probes: "服务监控",
       loss: "丢包",
@@ -366,6 +367,7 @@
       cycleTraffic: "This cycle",
       totalTraffic: "Total",
       bucketRtt: "Round-trip delay per sample bucket (last day)",
+      thisServer: "this server's loss today",
       bucketLoss: "Daily loss ratio over 30 days",
       probes: "Service checks",
       loss: "loss",
@@ -1016,6 +1018,7 @@
           });
         });
         state.cycleByServer = byServer;
+        queueHistories();
       })
       .catch(function () {
         /* service monitoring is optional on a dashboard */
@@ -1082,6 +1085,61 @@
           });
       })(id);
     }
+  }
+
+  // Per-server probe stats: /service/:id/history answers for every server at
+  // once per monitor, with each server's up_percent and per-point status --
+  // the only place nezha exposes loss per server (the /service counters are
+  // service-wide, identical on every card).
+  var historyCache = {};
+  var historyQueue = [];
+  var historyActive = 0;
+
+  function queueHistories() {
+    Object.keys(state.services).forEach(function (id) {
+      var hit = historyCache[id];
+      if (hit && Date.now() - hit.at < PROBE_TTL_MS) return;
+      if (historyQueue.indexOf(id) < 0) historyQueue.push(id);
+    });
+    pumpHistoryQueue();
+  }
+
+  function pumpHistoryQueue() {
+    while (historyActive < 3 && historyQueue.length) {
+      var id = historyQueue.shift();
+      historyActive++;
+      (function (mid) {
+        getJSON(API + "/service/" + mid + "/history?period=1d")
+          .then(function (data) {
+            var servers = {};
+            ((data && data.servers) || []).forEach(function (entry) {
+              servers[entry.server_id] = {
+                upPercent: Number((entry.stats && entry.stats.up_percent) || 0),
+                points: ((entry.stats && entry.stats.data_points) || []).map(function (dp) {
+                  return { ts: Number(dp.ts), delay: Number(dp.delay || 0), ok: Number(dp.status) !== 0 };
+                }),
+              };
+            });
+            historyCache[mid] = { at: Date.now(), servers: servers };
+          })
+          .catch(function () {
+            historyCache[mid] = { at: Date.now(), servers: {} };
+          })
+          .then(function () {
+            historyActive--;
+            repaintProbeRows();
+            pumpHistoryQueue();
+          });
+      })(id);
+    }
+  }
+
+  function repaintProbeRows() {
+    [views.card, views.ring].forEach(function (map) {
+      Object.keys(map).forEach(function (id) {
+        paintProbes(Number(id));
+      });
+    });
   }
 
   /* --- websocket -------------------------------------------------------- */
@@ -2162,7 +2220,7 @@
         n++;
         if (v <= 0) bad++;
       }
-      buckets.push({ value: n ? sum / n : 0, failed: bad * 2 >= n });
+      buckets.push({ v: n ? sum / n : 0, failed: bad * 2 >= n });
     }
     return buckets;
   }
@@ -2177,27 +2235,54 @@
     shown.forEach(function (info) {
       // model.ServiceInfos is serialised under the legacy monitor_* names, not
       // the Go field names, so the id, label and series are read from those.
-      var stats = state.services[info.monitor_id] || {};
+      // Loss and success come from the per-server history; the fallbacks only
+      // cover the seconds before the history fetch lands.
+      var mid = info.monitor_id;
+      var stats = state.services[mid] || {};
       var series = info.avg_delay || [];
+      var hist = historyCache[mid];
+      var entry = hist && hist.servers ? hist.servers[id] : null;
+      var points = entry ? entry.points : [];
+      var lastPoint = points.length ? points[points.length - 1] : null;
       var last = series.length ? Number(series[series.length - 1]) : null;
-      var lastOk = last != null && last > 0;
-      var downRate = dayDownRate(stats);
-      var rttBuckets = delayBuckets(series, 30);
+      var downRate = entry != null ? 100 - entry.upPercent : dayDownRate(stats);
+      var buckets = entry
+        ? historyBuckets(points, 30)
+        : delayBuckets(series, 30);
+
+      var msText;
+      var msColor = "";
+      if (lastPoint) {
+        if (lastPoint.ok) {
+          msText = Math.round(lastPoint.delay) + " ms";
+          msColor = rttColor(lastPoint.delay);
+        } else {
+          msText = t("timeout");
+          msColor = "var(--offline)";
+        }
+      } else if (last != null && last > 0) {
+        msText = Math.round(last) + " ms";
+        msColor = rttColor(last);
+      } else {
+        msText = "—";
+      }
+
       container.appendChild(
         h("div", { class: "probe-row" }, [
           h("span", {
             class: "probe-name",
-            text: info.monitor_name || String(info.monitor_id),
+            text: info.monitor_name || String(mid),
             "data-tip": info.monitor_name || "",
           }),
           h("span", {
             class: "probe-ms num",
-            style: last == null ? "" : "color:" + (lastOk ? rttColor(last) : "var(--offline)"),
-            text: last == null ? "—" : lastOk ? Math.round(last) + " ms" : t("timeout"),
+            style: msColor ? "color:" + msColor : "",
+            text: msText,
           }),
-          rttStrip(rttBuckets),
+          rttStrip(buckets),
           h("span", {
             class: "probe-loss num loss-" + lossLevel(downRate),
+            "data-tip": entry ? t("period1d") + " · " + t("thisServer") : "",
             text: downRate.toFixed(1) + "%",
           }),
           lossStrip(stats),
@@ -2219,7 +2304,7 @@
   function rttStrip(buckets) {
     var cells = buckets.map(function (b) {
       return h("i", {
-        style: "background:" + (b.failed ? "var(--offline)" : rttColor(b.value)),
+        style: "background:" + (b.failed ? "var(--offline)" : rttColor(b.v)),
       });
     });
     return h(
@@ -2227,6 +2312,26 @@
       { class: "strip", "data-tip": t("bucketRtt") },
       cells
     );
+  }
+
+  // Fold status'd history points into RTT buckets; a bucket is failed when
+  // most of its samples are, which is also how nezha sums a window up.
+  function historyBuckets(points, count) {
+    if (!points || !points.length) return [];
+    var step = Math.max(1, Math.ceil(points.length / count));
+    var out = [];
+    for (var i = 0; i < points.length; i += step) {
+      var sum = 0;
+      var n = 0;
+      var bad = 0;
+      for (var j = i; j < points.length && j < i + step; j++) {
+        sum += points[j].delay;
+        n++;
+        if (!points[j].ok) bad++;
+      }
+      out.push({ v: n ? sum / n : 0, failed: bad * 2 >= n });
+    }
+    return out;
   }
 
   // The thin strip: one cell per day of the 30-day window, coloured by that
@@ -3061,7 +3166,7 @@
       ctx.beginPath();
       var pen = false;
       tr.points.forEach(function (p) {
-        if (p.value <= 0) {
+        if (p.value <= 0 || p.ok === false) {
           // A failed sample is a gap, not a dip to the floor.
           pen = false;
           return;
@@ -3115,17 +3220,27 @@
     var infos = detail.latency.probes;
     var colors = chartColors().palette;
     var traces = infos.map(function (info, idx) {
-      var raw = (info.created_at || []).map(function (ts, i) {
-        return { ts: Number(ts), value: Number(info.avg_delay[i] || 0) };
-      });
+      var mid = info.monitor_id;
+      var stats = state.services[mid] || {};
+      var hist = historyCache[mid];
+      var entry = hist && hist.servers ? hist.servers[detail.server.id] : null;
+      var raw;
+      if (entry && entry.points.length) {
+        raw = entry.points.map(function (pt) {
+          return { ts: pt.ts, value: pt.delay, ok: pt.ok };
+        });
+      } else {
+        raw = (info.created_at || []).map(function (ts, i) {
+          return { ts: Number(ts), value: Number(info.avg_delay[i] || 0), ok: true };
+        });
+      }
       var buckets = downsampleSeries(raw, 360);
-      var stats = state.services[info.monitor_id] || {};
       return {
-        name: info.monitor_name || String(info.monitor_id),
+        name: info.monitor_name || String(mid),
         color: colors[idx % colors.length],
         points: buckets.points,
         drawn: buckets.count,
-        loss: dayDownRate(stats),
+        loss: entry ? 100 - entry.upPercent : dayDownRate(stats),
       };
     });
     detail.latency.traces = traces;
@@ -3146,7 +3261,11 @@
         sum += raw[j].value;
         n++;
       }
-      points.push({ ts: raw[Math.floor((i + end - 1) / 2)].ts, value: n ? sum / n : 0 });
+      points.push({
+        ts: raw[Math.floor((i + end - 1) / 2)].ts,
+        value: n ? sum / n : 0,
+        ok: raw[Math.floor((i + end - 1) / 2)].ok !== false,
+      });
     }
     return { points: points, count: points.length };
   }

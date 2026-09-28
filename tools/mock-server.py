@@ -283,6 +283,55 @@ def metric_points(server_id, metric, period):
     return points
 
 
+def monitor_history(service_id):
+    """Per-server stats for one monitor: up_percent and status'd points.
+
+    Loss varies by server -- a German box loses far more packets to 江西电信
+    than the Shanghai machine does -- which is exactly what the theme must
+    show, not one service-wide number.
+    """
+    name, kind = SERVICES[service_id - 1]
+    base = 20 + (service_id - 1) * 55
+    out = []
+    for s in FLEET.servers:
+        random.seed(7000 + s["id"] * 17 + service_id)
+        if (s["id"] + service_id) % 5 == 4:
+            continue  # not every monitor covers every server
+        far = s["cc"] in ("us", "de", "fr", "bg")
+        loss_p = {
+            1: 0.04 if far else 0.005,
+            2: 0.10 if far else 0.06,
+            3: 0.02,
+            4: 0.03 if far else 0.01,
+            5: 0.05,
+        }[service_id]
+        if s["offline_for"]:
+            loss_p = 0.98
+        count = 96
+        now = int(time.time() * 1000)
+        points = []
+        ok_count = 0
+        for k in range(count):
+            ok = random.random() > loss_p
+            delay = 0 if not ok else round(base * (2.4 if far else 1) + random.random() * 30, 1)
+            ok_count += 1 if ok else 0
+            points.append({"ts": (now - (count - k) * 15 * 60 * 1000), "delay": delay, "status": 1 if ok else 0})
+        out.append(
+            {
+                "server_id": s["id"],
+                "server_name": s["name"],
+                "stats": {
+                    "avg_delay": round(sum(p["delay"] for p in points) / count, 1),
+                    "up_percent": round(100.0 * ok_count / count, 2),
+                    "total_up": ok_count,
+                    "total_down": count - ok_count,
+                    "data_points": points,
+                },
+            }
+        )
+    return {"service_id": service_id, "service_name": name, "servers": out}
+
+
 class Handler(SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # A class attribute, not an instance one: BaseHTTPRequestHandler.__init__
@@ -348,6 +397,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.ok(
                 {"services": service_stats(), "cycle_transfer_stats": cycle_transfer()}
             )
+        if path.startswith("/api/v1/service/") and path.endswith("/history"):
+            sid = int(path.split("/")[4])
+            if 1 <= sid <= len(SERVICES):
+                return self.ok(monitor_history(sid))
+            return self.send_json({"success": False, "error": "service not found"}, 404)
         if path == "/api/v1/service/server":
             return self.ok([s["id"] for s in FLEET.servers])
         if path.startswith("/api/v1/server/") and path.endswith("/service"):
