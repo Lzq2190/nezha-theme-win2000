@@ -227,6 +227,8 @@
       bucketRtt: "最近 1 天每个采样桶的往返时延",
       thisServer: "本服务器当日丢包",
       bucketLoss: "30 天内每天的丢包比例",
+      bucketLossSelf: "本服务器 30 天内每天的丢包比例",
+      serviceWide: "该服务全部服务器合并",
       probes: "服务监控",
       loss: "丢包",
       noData: "暂无数据",
@@ -369,6 +371,8 @@
       bucketRtt: "Round-trip delay per sample bucket (last day)",
       thisServer: "this server's loss today",
       bucketLoss: "Daily loss ratio over 30 days",
+      bucketLossSelf: "This server's daily loss over 30 days",
+      serviceWide: "all servers of this service",
       probes: "Service checks",
       loss: "loss",
       noData: "no data",
@@ -1109,6 +1113,9 @@
       var id = historyQueue.shift();
       historyActive++;
       (function (mid) {
+        // The one-day series drives the loss figure, the last status and the
+        // RTT strip; members additionally pull 30 days for the thin strip,
+        // which would otherwise show service-wide counts from other servers.
         getJSON(API + "/service/" + mid + "/history?period=1d")
           .then(function (data) {
             var servers = {};
@@ -1121,9 +1128,22 @@
               };
             });
             historyCache[mid] = { at: Date.now(), servers: servers };
+            if (!state.isMember) return null;
+            return getJSON(API + "/service/" + mid + "/history?period=30d").then(function (d30) {
+              var servers30 = {};
+              ((d30 && d30.servers) || []).forEach(function (entry) {
+                servers30[entry.server_id] = {
+                  upPercent: Number((entry.stats && entry.stats.up_percent) || 0),
+                  points: ((entry.stats && entry.stats.data_points) || []).map(function (dp) {
+                    return { ts: Number(dp.ts), delay: Number(dp.delay || 0), ok: Number(dp.status) !== 0 };
+                  }),
+                };
+              });
+              historyCache[mid].servers30 = servers30;
+            });
           })
           .catch(function () {
-            historyCache[mid] = { at: Date.now(), servers: {} };
+            if (!historyCache[mid]) historyCache[mid] = { at: Date.now(), servers: {} };
           })
           .then(function () {
             historyActive--;
@@ -2285,7 +2305,7 @@
             "data-tip": entry ? t("period1d") + " · " + t("thisServer") : "",
             text: downRate.toFixed(1) + "%",
           }),
-          lossStrip(stats),
+          lossStrip(mid, id, stats),
         ])
       );
     });
@@ -2336,21 +2356,43 @@
 
   // The thin strip: one cell per day of the 30-day window, coloured by that
   // day's loss ratio.
-  function lossStrip(stats) {
+  function lossStrip(mid, serverId, stats) {
+    var hist = historyCache[mid];
+    var entry = hist && hist.servers30 ? hist.servers30[serverId] : null;
+    if (entry && entry.points && entry.points.length) {
+      // One cell per day of this server's own 30-day series.
+      var pts = entry.points;
+      var per = Math.max(1, Math.ceil(pts.length / 30));
+      var cells = [];
+      for (var i = 0; i < pts.length; i += per) {
+        var bad = 0;
+        var n = 0;
+        for (var j = i; j < pts.length && j < i + per; j++) {
+          n++;
+          if (!pts[j].ok) bad++;
+        }
+        cells.push(h("i", { style: "background:" + lossColor((bad / n) * 100) }));
+      }
+      return h("span", { class: "strip thin", "data-tip": t("bucketLossSelf") }, cells);
+    }
+    // Signed-out visitors: only the service-wide daily counts exist, so the
+    // strip shows every server's failures for that monitor, not just ours.
     var up = (stats && stats.up) || [];
     var down = (stats && stats.down) || [];
-    var cells = [];
-    for (var i = 0; i < 30; i++) {
-      var u = Number(up[i] || 0);
-      var d = Number(down[i] || 0);
+    var wide = [];
+    for (var k = 0; k < 30; k++) {
+      var u = Number(up[k] || 0);
+      var d = Number(down[k] || 0);
       if (u + d === 0) {
-        cells.push(h("i", { class: "idle" }));
+        wide.push(h("i", { class: "idle" }));
       } else {
-        var dayLoss = (d / (u + d)) * 100;
-        cells.push(h("i", { style: "background:" + lossColor(dayLoss) }));
+        wide.push(h("i", { style: "background:" + lossColor((d / (u + d)) * 100) }));
       }
     }
-    return h("span", { class: "strip thin", "data-tip": t("bucketLoss") }, cells);
+    return h("span", {
+      class: "strip thin",
+      "data-tip": t("bucketLoss") + "（" + t("serviceWide") + "）",
+    }, wide);
   }
 
   // Failed checks over all checks today -- the same loss rate the official

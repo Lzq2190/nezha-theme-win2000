@@ -283,7 +283,7 @@ def metric_points(server_id, metric, period):
     return points
 
 
-def monitor_history(service_id):
+def monitor_history(service_id, period="1d"):
     """Per-server stats for one monitor: up_percent and status'd points.
 
     Loss varies by server -- a German box loses far more packets to 江西电信
@@ -307,7 +307,8 @@ def monitor_history(service_id):
         }[service_id]
         if s["offline_for"]:
             loss_p = 0.98
-        count = 96
+        count = 240 if period == "30d" else 96
+        step_min = 180 if period == "30d" else 15
         now = int(time.time() * 1000)
         points = []
         ok_count = 0
@@ -315,7 +316,7 @@ def monitor_history(service_id):
             ok = random.random() > loss_p
             delay = 0 if not ok else round(base * (2.4 if far else 1) + random.random() * 30, 1)
             ok_count += 1 if ok else 0
-            points.append({"ts": (now - (count - k) * 15 * 60 * 1000), "delay": delay, "status": 1 if ok else 0})
+            points.append({"ts": (now - (count - k) * step_min * 60 * 1000), "delay": delay, "status": 1 if ok else 0})
         out.append(
             {
                 "server_id": s["id"],
@@ -385,6 +386,10 @@ class Handler(SimpleHTTPRequestHandler):
                 }
             )
         if path == "/api/v1/profile":
+            # MOCK_MEMBER=1 simulates a signed-in browser so the member-only
+            # paths (7d/30d ranges, per-server 30-day strips) can be checked.
+            if os.environ.get("MOCK_MEMBER") == "1":
+                return self.ok({"id": 1, "username": "admin"})
             return self.send_json({"success": False, "error": "unauthorized"}, 401)
         if path == "/api/v1/service-groups":
             return self.ok(
@@ -400,7 +405,7 @@ class Handler(SimpleHTTPRequestHandler):
         if path.startswith("/api/v1/service/") and path.endswith("/history"):
             sid = int(path.split("/")[4])
             if 1 <= sid <= len(SERVICES):
-                return self.ok(monitor_history(sid))
+                return self.ok(monitor_history(sid, query.get("period", "1d")))
             return self.send_json({"success": False, "error": "service not found"}, 404)
         if path == "/api/v1/service/server":
             return self.ok([s["id"] for s in FLEET.servers])
