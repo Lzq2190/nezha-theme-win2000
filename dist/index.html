@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="/assets/favicon.svg" />
+    <title>服务器监控</title>
+    <link rel="stylesheet" href="/assets/theme.css" />
+  </head>
+  <body>
+    <div id="root">
+      <!-- Painted before app.js runs, so the first frame is already a window. -->
+      <div class="desktop">
+        <div class="app-window raised">
+          <div class="title-bar">
+            <span class="title-bar-icon" aria-hidden="true"></span>
+            <span class="title-bar-text">服务器监控</span>
+          </div>
+          <div class="app-body">
+            <div class="loading-panel">
+              <div class="progress progress-indeterminate sunken">
+                <span class="progress-fill"></span>
+              </div>
+              <p class="text-muted">正在连接监控面板…</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Runs before first paint: a reader whose stored scheme is the dark one
+      // must not get a light frame while the stylesheet and app.js load.  The
+      // stylesheet paints the dark scheme by default and the light one on
+      // `body.light`, so the class is set here rather than a colour written.
+      // Light is what a reader with no stored choice gets -- Windows 2000 had
+      // no dark mode, and the grey-and-blue palette is the point of the theme.
+      try {
+        var scheme = JSON.parse(localStorage.getItem("nezha:w2k-scheme") || '"light"');
+        var dark =
+          scheme === "dark" ||
+          (scheme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (!dark) document.body.classList.add("light");
+      } catch (e) {
+        document.body.classList.add("light");
+      }
+      // A skin is a set of colours *and* corners, so a page that painted as
+      // Windows 2000 and then turned Aqua would flash its whole layout.  An
+      // unknown value is left off: Windows 2000 is what the stylesheet does
+      // with no attribute at all.
+      try {
+        var skin = JSON.parse(localStorage.getItem("nezha:w2k-skin") || "null");
+        if (["win31", "win2000", "xp", "aqua"].indexOf(skin) >= 0) {
+          document.body.dataset.skin = skin;
+        }
+      } catch (e) {
+        /* the default stands */
+      }
+    </script>
+    <noscript>
+      <p style="padding: 16px">这个主题需要 JavaScript 才能显示监控数据。</p>
+    </noscript>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
